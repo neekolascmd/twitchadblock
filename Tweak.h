@@ -2,6 +2,7 @@
 #import <AmazonIVSPlayer/IVSPlayer.h>
 #import <AmazonIVSPlayer/IVSTextMetadataCue.h>
 #import <CoreServices/LSApplicationProxy.h>
+#import <MobileCoreServices/MobileCoreServices.h>
 #import <Twitch/FollowingViewController.h>
 #import <Twitch/HeadlinerFollowingAdManager.h>
 #import <Twitch/LiveHLSURLProvider.h>
@@ -16,7 +17,6 @@
 #import "NSURL+TwitchAdBlock.h"
 #import "NSURLSession+TwitchAdBlock.h"
 #import "TWAdBlockAssetResourceLoaderDelegate.h"
-#import "fishhook/fishhook.h"
 
 @interface _TtC6Twitch27AssetResourceLoaderDelegate : NSObject <AVAssetResourceLoaderDelegate>
 - (BOOL)handleLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest;
