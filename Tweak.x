@@ -1,233 +1,258 @@
-#import <dlfcn.h>
 #import "Tweak.h"
 
 NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
 TWAdBlockAssetResourceLoaderDelegate *assetResourceLoaderDelegate;
 
+static BOOL TWAdBlockEnabled(void) {
+  return [tweakDefaults boolForKey:@"TWAdBlockEnabled"];
+}
+
+static BOOL TWAdBlockProxyEnabled(void) {
+  return [tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"];
+}
+
+static NSString *TWAdBlockProxyAddress(void) {
+  NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
+                        ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
+                        : PROXY_ADDR;
+  return [proxy isKindOfClass:NSString.class] ? [proxy stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+}
+
+static BOOL TWAdBlockIsUsherRequest(NSURLRequest *request) {
+  return [request.URL.host caseInsensitiveCompare:@"usher.ttvnw.net"] == NSOrderedSame;
+}
+
+static NSURL *TWAdBlockHTTPProxyURL(NSString *proxy) {
+  if (proxy.length == 0) return nil;
+  NSURL *URL = [NSURL URLWithString:proxy];
+  if (!URL || ![URL.scheme.lowercaseString hasPrefix:@"http"]) return nil;
+  return URL;
+}
+
 // Server-side video ad blocking
 
 %hook NSURLSession
+
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
-  ((NSMutableURLRequest *)request).HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
-  if (![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"]) return %orig;
-  NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
-                        ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
-                        : PROXY_ADDR;
-  if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    ((NSMutableURLRequest *)request).URL = [request.URL twab_URLWithProxyURL:proxyURL];
-  else
-    return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request);
-  return %orig;
+  if (!TWAdBlockEnabled() || !request) return %orig;
+
+  NSMutableURLRequest *mutableRequest = [request isKindOfClass:NSMutableURLRequest.class]
+                                             ? (NSMutableURLRequest *)request
+                                             : request.mutableCopy;
+  mutableRequest.HTTPBody = [request.HTTPBody twab_requestDataForRequest:request];
+
+  if (!TWAdBlockProxyEnabled() || !TWAdBlockIsUsherRequest(mutableRequest))
+    return %orig(mutableRequest);
+
+  NSString *proxy = TWAdBlockProxyAddress();
+  if (proxy.length == 0) return %orig(mutableRequest);
+
+  NSURL *proxyURL = TWAdBlockHTTPProxyURL(proxy);
+  if (proxyURL) {
+    NSURL *rewrittenURL = [mutableRequest.URL twab_URLWithProxyURL:proxyURL];
+    if (rewrittenURL) mutableRequest.URL = rewrittenURL;
+    return %orig(mutableRequest);
+  }
+
+  NSURLSession *proxySession = [self twab_proxySessionWithAddress:proxy];
+  return proxySession ? [proxySession dataTaskWithRequest:mutableRequest] : %orig(mutableRequest);
 }
+
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request
                                          fromData:(NSData *)bodyData {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if (![request isKindOfClass:NSMutableURLRequest.class]) request = request.mutableCopy;
-  bodyData = [bodyData twab_requestDataForRequest:request];
-  if (![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"]) return %orig;
-  NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
-                        ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
-                        : PROXY_ADDR;
-  if (![request.URL.host isEqualToString:@"usher.ttvnw.net"]) return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:proxy];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    ((NSMutableURLRequest *)request).URL = [request.URL twab_URLWithProxyURL:proxyURL];
-  else
-    return &%orig([self twab_proxySessionWithAddress:proxy], _cmd, request, bodyData);
-  return %orig;
+  if (!TWAdBlockEnabled() || !request) return %orig;
+
+  NSMutableURLRequest *mutableRequest = [request isKindOfClass:NSMutableURLRequest.class]
+                                             ? (NSMutableURLRequest *)request
+                                             : request.mutableCopy;
+  NSData *rewrittenBody = [bodyData twab_requestDataForRequest:request];
+
+  if (!TWAdBlockProxyEnabled() || !TWAdBlockIsUsherRequest(mutableRequest))
+    return %orig(mutableRequest, rewrittenBody);
+
+  NSString *proxy = TWAdBlockProxyAddress();
+  if (proxy.length == 0) return %orig(mutableRequest, rewrittenBody);
+
+  NSURL *proxyURL = TWAdBlockHTTPProxyURL(proxy);
+  if (proxyURL) {
+    NSURL *rewrittenURL = [mutableRequest.URL twab_URLWithProxyURL:proxyURL];
+    if (rewrittenURL) mutableRequest.URL = rewrittenURL;
+    return %orig(mutableRequest, rewrittenBody);
+  }
+
+  NSURLSession *proxySession = [self twab_proxySessionWithAddress:proxy];
+  return proxySession ? [proxySession uploadTaskWithRequest:mutableRequest fromData:rewrittenBody]
+                      : %orig(mutableRequest, rewrittenBody);
 }
+
 %end
 
 %hook AVURLAsset
+
 - (instancetype)initWithURL:(NSURL *)URL options:(NSDictionary<NSString *, id> *)options {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"] ||
-      ![tweakDefaults boolForKey:@"TWAdBlockProxyEnabled"] ||
-      ![URL.scheme isEqualToString:@"https"] || ![URL.host isEqualToString:@"usher.ttvnw.net"])
+  if (!TWAdBlockEnabled() || !TWAdBlockProxyEnabled() || !URL ||
+      ![URL.scheme.lowercaseString isEqualToString:@"https"] ||
+      [URL.host caseInsensitiveCompare:@"usher.ttvnw.net"] != NSOrderedSame)
     return %orig;
-  NSURL *proxyURL = [NSURL URLWithString:[tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
-                                             ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
-                                             : PROXY_ADDR];
-  if ([proxyURL.scheme hasPrefix:@"http"])
-    return %orig([URL twab_URLWithProxyURL:proxyURL], options);
-  NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:YES];
+
+  NSString *proxy = TWAdBlockProxyAddress();
+  if (proxy.length == 0) return %orig;
+
+  NSURL *proxyURL = TWAdBlockHTTPProxyURL(proxy);
+  if (proxyURL) {
+    NSURL *rewrittenURL = [URL twab_URLWithProxyURL:proxyURL];
+    return rewrittenURL ? %orig(rewrittenURL, options) : %orig;
+  }
+
+  NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
   components.scheme = @"twab";
-  URL = components.URL;
-  if ((self = %orig)) {
+  NSURL *rewrittenURL = components.URL;
+  if (!rewrittenURL) return %orig;
+
+  if ((self = %orig(rewrittenURL, options))) {
     [self.resourceLoader setDelegate:assetResourceLoaderDelegate
                                queue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)];
   }
   return self;
 }
+
 %end
 
 %hook _TtC6Twitch27AssetResourceLoaderDelegate
+
 %new
 - (BOOL)handleLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
   NSURL *URL = loadingRequest.request.URL;
-  if (![URL.scheme isEqualToString:@"twab"]) return NO;
-  AVAssetResourceLoadingDataRequest *dataRequest = loadingRequest.dataRequest;
-  NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:YES];
+  if (!URL || ![URL.scheme.lowercaseString isEqualToString:@"twab"]) return NO;
+
+  NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
   components.scheme = @"https";
+  if (!components.URL) return NO;
+
   NSMutableURLRequest *request = loadingRequest.request.mutableCopy;
   request.URL = components.URL;
-  NSString *proxy = [tweakDefaults boolForKey:@"TWAdBlockCustomProxyEnabled"]
-                        ? [tweakDefaults stringForKey:@"TWAdBlockProxy"]
-                        : PROXY_ADDR;
+
+  NSString *proxy = TWAdBlockProxyAddress();
+  if (proxy.length == 0) return NO;
+
   NSURLSession *session = [[NSURLSession alloc] twab_proxySessionWithAddress:proxy];
+  if (!session) return NO;
+
   [[session dataTaskWithRequest:request
               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (error) return [loadingRequest finishLoadingWithError:error];
-                loadingRequest.contentInformationRequest.contentType = AVFileTypeMPEG4;
-                [dataRequest respondWithData:data];
+                if (error) {
+                  [loadingRequest finishLoadingWithError:error];
+                  return;
+                }
+                if (!data) {
+                  NSError *emptyResponseError = [NSError errorWithDomain:@"com.level3tjg.twitchadblock"
+                                                                     code:1
+                                                                 userInfo:@{NSLocalizedDescriptionKey: @"Proxy returned an empty response"}];
+                  [loadingRequest finishLoadingWithError:emptyResponseError];
+                  return;
+                }
+
+                NSHTTPURLResponse *HTTPResponse = [response isKindOfClass:NSHTTPURLResponse.class]
+                                                      ? (NSHTTPURLResponse *)response
+                                                      : nil;
+                AVAssetResourceLoadingContentInformationRequest *contentInfo = loadingRequest.contentInformationRequest;
+                if (contentInfo) {
+                  NSString *MIMEType = HTTPResponse.MIMEType ?: @"application/vnd.apple.mpegurl";
+                  contentInfo.contentType = (__bridge_transfer NSString *)UTTypeCreatePreferredIdentifierForTag(
+                      kUTTagClassMIMEType, (__bridge CFStringRef)MIMEType, NULL);
+                  contentInfo.contentLength = HTTPResponse.expectedContentLength;
+                  contentInfo.byteRangeAccessSupported = YES;
+                }
+
+                [loadingRequest.dataRequest respondWithData:data];
                 [loadingRequest finishLoading];
               }] resume];
   return YES;
 }
+
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
     shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
-  return ![self handleLoadingRequest:loadingRequest] ? %orig : YES;
+  return [self handleLoadingRequest:loadingRequest] ? YES : %orig;
 }
+
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
     shouldWaitForRenewalOfRequestedResource:(AVAssetResourceRenewalRequest *)renewalRequest {
-  return ![self handleLoadingRequest:renewalRequest] ? %orig : YES;
+  return [self handleLoadingRequest:renewalRequest] ? YES : %orig;
 }
+
 %end
 
-%hook AVPlayer
-- (instancetype)init {
-  if ((self = %orig)) {
-    [self addObserver:self forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:NULL];
-  }
-  return self;
-}
-%new
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary<NSKeyValueChangeKey, id> *)change
-                       context:(void *)context {
-  if ([keyPath isEqualToString:@"status"] &&
-      [change[NSKeyValueChangeNewKey] integerValue] == AVPlayerStatusReadyToPlay)
-    [self play];
-}
-%end
-
-// Client-side video ad blocking
-
-static void removeAdControllers(void *ptr) {
-  if (((uintptr_t)ptr & 0xFFFF800000000000) != 0) return;
-  id obj = (__bridge id)ptr;
-  Ivar theaterAdControllerIvar =
-      class_getInstanceVariable(object_getClass(obj), "theaterAdController");
-  if (!theaterAdControllerIvar) return;
-  id theaterAdController = object_getIvar(obj, theaterAdControllerIvar);
-  const char *ivars[] = {"displayAdController", "streamDisplayAdStateManager", "vastAdController"};
-  for (int i = 0; i < sizeof(ivars) / sizeof(ivars[0]); i++) {
-    Ivar adControllerIvar =
-        class_getInstanceVariable(object_getClass(theaterAdController), ivars[i]);
-    if (adControllerIvar) object_setIvar(theaterAdController, adControllerIvar, nil);
-  }
-}
-
-static void *(*orig_swift_unknownObjectWeakAssign)(void *, void *);
-static void *hook_swift_unknownObjectWeakAssign(void *ref, void *value) {
-  void *result = orig_swift_unknownObjectWeakAssign(ref, value);
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return result;
-  removeAdControllers(value);
-  return result;
-}
-
-static void *(*orig_swift_unknownObjectWeakLoadStrong)(void *);
-static void *hook_swift_unknownObjectWeakLoadStrong(void *ref) {
-  void *result = orig_swift_unknownObjectWeakLoadStrong(ref);
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return result;
-  removeAdControllers(result);
-  return result;
-}
-
-// Block ads in feed tab
+// Client-side ad suppression using known Twitch classes only. The previous global
+// Swift weak-reference interception was removed because it inspected arbitrary
+// runtime pointers and could crash when Twitch or the Swift runtime changed.
 
 %hook _TtC9TwitchKit18TKURLSessionClient
+
 - (void)URLSession:(NSURLSession *)session
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  %orig(session, dataTask, [data twab_responseDataForRequest:dataTask.currentRequest]);
+  if (!TWAdBlockEnabled() || !data) return %orig;
+  NSData *filteredData = [data twab_responseDataForRequest:dataTask.currentRequest];
+  %orig(session, dataTask, filteredData ?: data);
 }
+
 %end
 
-// Block ads in following tab
+static void TWAdBlockClearIvar(id object, const char *name) {
+  if (!object || !name) return;
+  Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+  if (ivar) object_setIvar(object, ivar, nil);
+}
+
+static void TWAdBlockConfigureFollowingController(id controller) {
+  if (!controller) return;
+  Ivar headlinerManagerIvar = class_getInstanceVariable(object_getClass(controller), "headlinerManager");
+  if (headlinerManagerIvar) TWAdBlockClearIvar(controller, "displayAdStateManager");
+}
 
 %hook _TtC6Twitch23FollowingViewController
+
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
                    themeManager:(_TtC12TwitchCoreUI21TWDefaultThemeManager *)themeManager {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if ((self = %orig)) {
-    Ivar headlinerManagerIvar =
-        class_getInstanceVariable(object_getClass(self), "headlinerManager");
-    if (headlinerManagerIvar) {
-      Ivar displayAdStateManagerIvar =
-          class_getInstanceVariable(object_getClass(self), "displayAdStateManager");
-      if (displayAdStateManagerIvar) object_setIvar(self, displayAdStateManagerIvar, nil);
-    }
-  }
+  self = %orig;
+  if (self && TWAdBlockEnabled()) TWAdBlockConfigureFollowingController(self);
   return self;
 }
+
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
                    themeManager:(_TtC12TwitchCoreUI21TWDefaultThemeManager *)themeManager
                   urlController:(_TtC6Twitch13URLController *)urlController {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
-  if ((self = %orig)) {
-    Ivar headlinerManagerIvar =
-        class_getInstanceVariable(object_getClass(self), "headlinerManager");
-    if (headlinerManagerIvar) {
-      Ivar displayAdStateManagerIvar =
-          class_getInstanceVariable(object_getClass(self), "displayAdStateManager");
-      if (displayAdStateManagerIvar) object_setIvar(self, displayAdStateManagerIvar, nil);
-    }
-  }
+  self = %orig;
+  if (self && TWAdBlockEnabled()) TWAdBlockConfigureFollowingController(self);
   return self;
 }
+
 %end
 
 %hook _TtC6Twitch27HeadlinerFollowingAdManager
+
 + (instancetype)shared {
-  if (![tweakDefaults boolForKey:@"TWAdBlockEnabled"]) return %orig;
   _TtC6Twitch27HeadlinerFollowingAdManager *shared = %orig;
-  if (shared) {
-    Ivar displayAdStateManagerIvar =
-        class_getInstanceVariable(object_getClass(shared), "displayAdStateManager");
-    if (displayAdStateManagerIvar) object_setIvar(shared, displayAdStateManagerIvar, nil);
-  }
+  if (shared && TWAdBlockEnabled()) TWAdBlockClearIvar(shared, "displayAdStateManager");
   return shared;
 }
+
 %end
 
 // Block update prompt
 
 %hook TWAppUpdatePrompt
-+ (void)startMonitoringSavantSettingsToShowPromptIfNeeded {
-}
++ (void)startMonitoringSavantSettingsToShowPromptIfNeeded {}
 %end
 
 %ctor {
-  rebind_symbols(
-      (struct rebinding[]){
-          {"swift_unknownObjectWeakAssign", (void *)hook_swift_unknownObjectWeakAssign,
-           (void **)&orig_swift_unknownObjectWeakAssign},
-          {"swift_unknownObjectWeakLoadStrong", (void *)hook_swift_unknownObjectWeakLoadStrong,
-           (void **)&orig_swift_unknownObjectWeakLoadStrong},
-      },
-      2);
   tweakBundle = [NSBundle bundleWithPath:[NSBundle.mainBundle pathForResource:@"TwitchAdBlock"
                                                                        ofType:@"bundle"]];
   if (!tweakBundle)
     tweakBundle = [NSBundle
         bundleWithPath:ROOT_PATH_NS(@"/Library/Application Support/TwitchAdBlock.bundle")];
+
   tweakDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.level3tjg.twitchadblock"];
   if (![tweakDefaults objectForKey:@"TWAdBlockEnabled"])
     [tweakDefaults setBool:YES forKey:@"TWAdBlockEnabled"];
@@ -235,5 +260,6 @@ static void *hook_swift_unknownObjectWeakLoadStrong(void *ref) {
     [tweakDefaults setBool:NO forKey:@"TWAdBlockProxyEnabled"];
   if (![tweakDefaults objectForKey:@"TWAdBlockCustomProxyEnabled"])
     [tweakDefaults setBool:NO forKey:@"TWAdBlockCustomProxyEnabled"];
+
   assetResourceLoaderDelegate = [[TWAdBlockAssetResourceLoaderDelegate alloc] init];
 }
