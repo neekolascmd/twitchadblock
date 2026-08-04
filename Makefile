@@ -2,7 +2,7 @@ ifeq ($(SIDELOADED),1)
 MODULES = jailed
 endif
 
-PACKAGE_VERSION = 0.1.5
+PACKAGE_VERSION = 0.2.0
 ifdef APP_VERSION
   PACKAGE_VERSION := $(APP_VERSION)-$(PACKAGE_VERSION)
 endif
@@ -25,7 +25,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = TwitchAdBlock
 
-$(TWEAK_NAME)_FILES = $(filter-out Sideloaded.x, $(wildcard *.x)) $(wildcard *.*m) fishhook/fishhook.c
+$(TWEAK_NAME)_FILES = $(filter-out Sideloaded.x, $(wildcard *.x)) $(wildcard *.*m)
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc -Iinclude -DPACKAGE_VERSION=@\"$(PACKAGE_VERSION)\"
 $(TWEAK_NAME)_LOGOS_DEFAULT_GENERATOR = internal
 ifeq ($(SIDELOADED),1)
